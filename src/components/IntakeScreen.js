@@ -13,6 +13,7 @@ const PHASE = {
   ASKING: 'asking',
   LISTENING: 'listening',
   PROCESSING: 'processing',
+  FINAL_COMMENTS: 'final_comments',
   COMPLETE: 'complete',
 };
 
@@ -50,10 +51,17 @@ export default function IntakeScreen({ sessionId, onComplete }) {
     isSubmittingRef.current = true;
     addDialog('patient', text);
     setLiveTranscript('');
-    setPhase(PHASE.PROCESSING);
-    await submitAnswer(text);
+    
+    // Check if we're in final comments phase
+    if (phase === PHASE.FINAL_COMMENTS) {
+      await submitFinalComments(text);
+    } else {
+      setPhase(PHASE.PROCESSING);
+      await submitAnswer(text);
+    }
+    
     isSubmittingRef.current = false;
-  }, []); // eslint-disable-line
+  }, [phase]); // eslint-disable-line
 
   const handleInterimTranscript = useCallback((text) => {
     setLiveTranscript(text);
@@ -156,6 +164,29 @@ export default function IntakeScreen({ sessionId, onComplete }) {
       });
       const data = await res.json();
 
+      // Handle name retry
+      if (data.requiresRetry) {
+        setPhase(PHASE.ASKING);
+        addDialog('avatar', data.question);
+        await speak(data.question);
+        resetTranscript();
+        setPhase(PHASE.LISTENING);
+        startListening();
+        return;
+      }
+
+      // Handle final comments phase
+      if (data.state === 'final_comments') {
+        setPhase(PHASE.FINAL_COMMENTS);
+        addDialog('avatar', data.question);
+        await speak(data.question);
+        resetTranscript();
+        setPhase(PHASE.LISTENING);
+        startListening();
+        return;
+      }
+
+      // Handle completion
       if (data.state === 'complete') {
         setSummary(data.summary);
         setPhase(PHASE.COMPLETE);
@@ -165,6 +196,19 @@ export default function IntakeScreen({ sessionId, onComplete }) {
         return;
       }
 
+      // Handle follow-up questions
+      if (data.isFollowUp) {
+        setCurrentQuestion(data.question);
+        setPhase(PHASE.ASKING);
+        addDialog('avatar', data.question);
+        await speak(data.question);
+        resetTranscript();
+        setPhase(PHASE.LISTENING);
+        startListening();
+        return;
+      }
+
+      // Normal next question flow
       setCurrentQuestion(data.question);
       setProgress(data.progress);
       setPhase(PHASE.ASKING);
@@ -175,6 +219,28 @@ export default function IntakeScreen({ sessionId, onComplete }) {
       startListening();
     } catch (err) {
       console.error('Submit error:', err);
+    }
+  };
+
+  // ─── Submit final comments and complete ────────────────────────────────────
+  const submitFinalComments = async (comments) => {
+    stopListening();
+    try {
+      setPhase(PHASE.PROCESSING);
+      const res = await fetch(`${BACKEND_URL}/api/sessions/${sessionId}/final-comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finalComments: comments }),
+      });
+      const data = await res.json();
+
+      setSummary(data.summary);
+      setPhase(PHASE.COMPLETE);
+      addDialog('avatar', data.message);
+      await speak(data.message);
+      if (onComplete) onComplete(data.summary);
+    } catch (err) {
+      console.error('Final comments error:', err);
     }
   };
 
@@ -244,11 +310,7 @@ export default function IntakeScreen({ sessionId, onComplete }) {
         {/* Status / controls */}
         <div className="controls-area">
           {phase === PHASE.WAITING_START && (
-            <button
-              className="action-btn primary"
-              onClick={handleStartIntake}
-              disabled={phase === PHASE.GREETING || isSpeaking}
-            >
+            <button className="action-btn primary" onClick={handleStartIntake} disabled={phase === PHASE.GREETING}>
               Begin Health Screening <span className="btn-arrow">→</span>
             </button>
           )}
